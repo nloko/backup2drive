@@ -1,0 +1,9 @@
+data.db
+encrypt_key
+creds.json
+backups.yaml
+bin
+include
+lib
+.Python
+client_secrets.json
