@@ -1,0 +1,9 @@
+backups:
+  - path: /Users/me/Sites
+    archive: websites
+    script: /Users/me/dump_databases.sh
+  - path: /Users/me/Pictures/selfies
+    archive: selfies 
+  - path: /Users/me/Documents/crazy_awesome_things
+    archive: important_stuff 
+    encrypt: 1
