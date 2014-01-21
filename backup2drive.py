@@ -19,18 +19,16 @@ except ImportError:
 from Crypto.Cipher import AES
 from Crypto import Random
 
+from multiprocessing import Process, JoinableQueue
+
 TMP = '/tmp'
 KEY_FILE = 'encrypt_key'
 SHELVE = 'data'
+NUMBER_OF_PROCESSES = 3
 
 pad_size = lambda s: AES.block_size - len(s) % AES.block_size
 pad = lambda s, l: s + l * chr(l)
 
-parser = OptionParser()
-parser.add_option("-c", "--confirm", dest="confirm", default=False,
-                      action="store_true", help="Confirm backups")
-
-(options, args) = parser.parse_args()
 
 def get_backups():
   stream = file('backups.yaml', 'r')
@@ -54,6 +52,7 @@ def get_drive():
   return GoogleDrive(gauth) # Create GoogleDrive instance with authenticated GoogleAuth instance
 
 def upload_file(drive, f):
+  print "Uploading %s..." % f
   attr = {} 
   if db.has_key(f):
     print "Adding revision to file id %s" % db[f]
@@ -61,7 +60,8 @@ def upload_file(drive, f):
   file = drive.CreateFile(attr)
   file.SetContentFile(f)
   file.Upload()
-  db[f] = file['id']
+  print "%s uploaded." % f
+  return (f, file['id'])
 
 def confirm_backup(path):
     ok = 0
@@ -93,6 +93,21 @@ def encrypt_archive(f):
     with open(f + '.encrypted', 'w') as out_file:
       out_file.write((encrypt(in_file.read())))
 
+def start_pool():
+  for i in range(NUMBER_OF_PROCESSES):
+    Process(target=worker, args=(task_queue, output_queue)).start()
+
+def stop_pool():
+  for i in range(NUMBER_OF_PROCESSES):
+    task_queue.put('STOP')
+
+def worker(input, output):
+  for f, args in iter(input.get, 'STOP'):
+    try:
+      output.put(f(*args))
+    finally:
+      input.task_done()
+
 def archive(upload=True):
   drive = get_drive() 
   for meta in get_backups()['backups']:
@@ -120,11 +135,29 @@ def archive(upload=True):
         f += '.encrypted'
      
       if (upload):
-        print "Uploading %s..." % f
-        upload_file(drive, f)
+        task_queue.put((upload_file, (drive, f)))
     except Exception as e:
       print "Something bad happened:", str(e) 
 
-db = shelve.open(SHELVE)
-archive()
-db.close()
+if __name__ == '__main__':
+  db = shelve.open(SHELVE)
+  task_queue = JoinableQueue()
+  output_queue = JoinableQueue()
+
+  parser = OptionParser()
+  parser.add_option("-c", "--confirm", dest="confirm", default=False,
+                        action="store_true", help="Confirm backups")
+
+  (options, args) = parser.parse_args()
+  
+  start_pool()
+  try:
+    archive()
+    task_queue.join()
+    stop_pool()
+
+    while not output_queue.empty():
+      k, v = output_queue.get()
+      db[k] = v
+  finally:
+    db.close()
