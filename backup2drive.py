@@ -19,12 +19,12 @@ except ImportError:
 from Crypto.Cipher import AES
 from Crypto import Random
 
-from multiprocessing import Process, JoinableQueue
+from multiprocessing import Process, JoinableQueue, Queue
 
 TMP = '/tmp'
 KEY_FILE = 'encrypt_key'
 SHELVE = 'data'
-NUMBER_OF_PROCESSES = 3
+NUMBER_OF_PROCESSES = 4 
 
 pad_size = lambda s: AES.block_size - len(s) % AES.block_size
 pad = lambda s, l: s + l * chr(l)
@@ -82,7 +82,8 @@ def get_full_archive_name(archive):
 
 def create_archive(d, f):
   with open(f, 'w') as out_file:
-    tar = subprocess.Popen(('tar', '-c', d), stdout=subprocess.PIPE)
+    with open("NUL", 'w') as black_hole:
+      tar = subprocess.Popen(('tar', '-c', d), stdout=subprocess.PIPE, stderr=black_hole)
     gzip = subprocess.Popen(('gzip'), stdin=tar.stdout, stdout=out_file)
     tar.stdout.close()
     gzip.communicate()
@@ -108,8 +109,22 @@ def worker(input, output):
     finally:
       input.task_done()
 
-def archive(upload=True):
-  drive = get_drive() 
+def archive(path, file, encrypt=False, drive=None):
+  print 'Archiving %s as %s' % (path, file)
+  try:
+    create_archive(path, file)
+
+    if encrypt:
+      encrypt_archive(file)
+      file += '.encrypted'
+   
+    if drive:
+      return upload_file(drive, file)
+  except Exception as e:
+    print "Archive failed.", str(e)
+
+def do(upload=True):
+  drive = None
   for meta in get_backups()['backups']:
     d = meta['path']
     if options.confirm:
@@ -126,23 +141,14 @@ def archive(upload=True):
         print 'There was an error running %s. Skipping %s...' % (s, d)
         continue
 
-    try:
-      print 'Archiving %s as %s' % (d, f)
-      create_archive(d, f)
-    
-      if meta.has_key('encrypt'):
-        encrypt_archive(f)
-        f += '.encrypted'
-     
-      if (upload):
-        task_queue.put((upload_file, (drive, f)))
-    except Exception as e:
-      print "Something bad happened:", str(e) 
+    if upload and not drive:
+      drive = get_drive() 
+    task_queue.put((archive, (d, f, meta.has_key('encrypt'), drive)))
 
 if __name__ == '__main__':
   db = shelve.open(SHELVE)
   task_queue = JoinableQueue()
-  output_queue = JoinableQueue()
+  output_queue = Queue()
 
   parser = OptionParser()
   parser.add_option("-c", "--confirm", dest="confirm", default=False,
@@ -150,14 +156,18 @@ if __name__ == '__main__':
 
   (options, args) = parser.parse_args()
   
-  start_pool()
   try:
-    archive()
+    start_pool()
+    do()
     task_queue.join()
     stop_pool()
 
     while not output_queue.empty():
-      k, v = output_queue.get()
-      db[k] = v
+      result = output_queue.get()
+      try:
+        k, v = result
+        db[k] = v
+      except:
+        pass
   finally:
     db.close()
