@@ -4,6 +4,7 @@ from optparse import OptionParser
 from pydrive.auth import GoogleAuth
 from pydrive.drive import GoogleDrive
 
+import traceback
 import subprocess
 import os
 import base64
@@ -54,14 +55,14 @@ def get_drive():
 def upload_file(drive, f):
   print "Uploading %s..." % f
   attr = {} 
-  if db.has_key(f):
-    print "Adding revision to file id %s" % db[f]
-    attr['id'] = db[f] 
+  if db.has_key(f) and len(db[f]) > 1:
+    print "Adding revision to file id %s" % db[f][1]
+    attr['id'] = db[f][1] 
   file = drive.CreateFile(attr)
   file.SetContentFile(f)
   file.Upload()
   print "%s uploaded." % f
-  return (f, file['id'])
+  return file['id']
 
 def confirm_backup(path):
     ok = 0
@@ -76,23 +77,6 @@ def confirm_backup(path):
         break
 
     return ok
-
-def get_full_archive_name(archive):
-    return os.path.join(TMP, archive) + '.tar.gz'
-
-def create_archive(d, f):
-  with open(f, 'w') as out_file:
-    with open("NUL", 'w') as black_hole:
-      tar = subprocess.Popen(('tar', '-c', d), stdout=subprocess.PIPE, stderr=black_hole)
-    gzip = subprocess.Popen(('gzip'), stdin=tar.stdout, stdout=out_file)
-    tar.stdout.close()
-    gzip.communicate()
-
-def encrypt_archive(f):
-  print 'Encrypting %s...' % f
-  with open(f, 'rb') as in_file:
-    with open(f + '.encrypted', 'w') as out_file:
-      out_file.write((encrypt(in_file.read())))
 
 def start_pool():
   for i in range(NUMBER_OF_PROCESSES):
@@ -113,15 +97,50 @@ def archive(path, file, encrypt=False, drive=None):
   print 'Archiving %s as %s' % (path, file)
   try:
     create_archive(path, file)
+    hash = md5(file)
+    if not options.force and db.has_key(file):
+      if hash == db[file][0]:
+        print "Archive %s %s = %s. Skipping..." % (file, hash, db[file][0])
+        return 
+      else:
+        print "Archive %s %s != %s. Proceeding..." % (file, hash, db[file][0])
 
+    u_file = file
     if encrypt:
       encrypt_archive(file)
-      file += '.encrypted'
-   
+      u_file += '.encrypted'
+  
+    id = None
     if drive:
-      return upload_file(drive, file)
+      id = upload_file(drive, u_file)
+
+    return (file, (hash, id))
   except Exception as e:
-    print "Archive failed.", str(e)
+    traceback.print_exc()
+
+def get_full_archive_name(archive):
+    return os.path.join(TMP, archive) + '.tar.gz'
+
+def create_archive(d, f):
+  with open(f, 'w') as out_file:
+    with open("NUL", 'w') as black_hole:
+      tar = subprocess.Popen(('tar', '-c', d), stdout=subprocess.PIPE, stderr=black_hole)
+    gzip = subprocess.Popen(('gzip', '-n'), stdin=tar.stdout, stdout=out_file)
+    tar.stdout.close()
+    gzip.communicate()
+
+def encrypt_archive(f):
+  print 'Encrypting %s...' % f
+  with open(f, 'rb') as in_file:
+    with open(f + '.encrypted', 'w') as out_file:
+      out_file.write((encrypt(in_file.read())))
+
+def md5(f):
+  cmd = subprocess.Popen(('md5', f), stdout=subprocess.PIPE)
+  hash = subprocess.check_output(('cut', '-d', ' ', '-f', '4'), stdin=cmd.stdout)
+  cmd.stdout.close()
+  print "%s has md5 %s" % (f, hash)
+  return hash
 
 def do(upload=True):
   drive = None
@@ -153,7 +172,8 @@ if __name__ == '__main__':
   parser = OptionParser()
   parser.add_option("-c", "--confirm", dest="confirm", default=False,
                         action="store_true", help="Confirm backups")
-
+  parser.add_option("-f", "--force", dest="force", default=False,
+                        action="store_true", help="Force uploads")
   (options, args) = parser.parse_args()
   
   try:
